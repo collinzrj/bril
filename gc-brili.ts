@@ -19,6 +19,10 @@ function error(message: string): BriliError {
   return new BriliError(message);
 }
 
+function isPointer(val: Value): Boolean {
+    return typeof val === "object" && "loc" in val && "type" in val;
+}
+
 /**
  * An abstract key class used to access the heap.
  * This allows for "pointer arithmetic" on keys,
@@ -26,6 +30,7 @@ function error(message: string): BriliError {
  */
 export class Key {
     readonly base: number;
+    // we can allocate an array, so it has a offset
     readonly offset: number;
 
     constructor(b: number, o: number) {
@@ -44,8 +49,10 @@ export class Key {
 export class Heap<X> {
 
     private readonly storage: Map<number, X[]>
+    private readonly ref_count: Map<number, number>
     constructor() {
-        this.storage = new Map()
+        this.storage = new Map();
+        this.ref_count = new Map();
     }
 
     isEmpty(): boolean {
@@ -69,7 +76,18 @@ export class Heap<X> {
         }
         let base = this.getNewBase();
         this.storage.set(base, new Array(amt))
+        // TODO: set ref_count here?
         return new Key(base, 0);
+    }
+
+    auto_free() {
+      for (let key of Array.from(this.ref_count.keys())) {
+        if (this.ref_count[key] == 0) {
+          // TODO: can we make sure storage and ref_count are consistent?
+          this.storage.delete(key);
+          this.ref_count.delete(key);
+        }
+      }
     }
 
     free(key: Key) {
@@ -97,6 +115,27 @@ export class Heap<X> {
         } else {
             throw error(`Uninitialized heap location ${key.base} and/or illegal offset ${key.offset}`);
         }
+    }
+
+    incRefCount(base:number) {
+        this.ref_count[base]++;
+    }
+    
+    decRefCount(base:number) {
+      if (this.ref_count[base] <= 0) {
+        return
+      }
+      this.ref_count[base]--;
+      // decrement recursively if becomes 0
+      if (this.ref_count[base] == 0) {
+        let value_list = this.storage[base];
+        for (let i = 0; i < value_list.length; i++) {
+          if (isPointer(value_list[i])) {
+            let ptr_val = value_list[i] as Pointer;
+            this.decRefCount(ptr_val.loc.base);
+          }
+        }
+      }
     }
 }
 
@@ -312,6 +351,7 @@ type State = {
   env: Env,
   readonly heap: Heap<Value>,
   readonly funcs: readonly bril.Function[],
+  pointer_stack: Array<number>,
 
   // For profiling: a total count of the number of instructions executed.
   icount: bigint,
@@ -343,7 +383,7 @@ function evalCall(instr: bril.Operation, state: State): Action {
   if (params.length !== args.length) {
     throw error(`function expected ${params.length} arguments, got ${args.length}`);
   }
-
+  let pointer_stack = new Array<number>();
   for (let i = 0; i < params.length; i++) {
     // Look up the variable in the current (calling) environment.
     let value = get(state.env, args[i]);
@@ -355,12 +395,19 @@ function evalCall(instr: bril.Operation, state: State): Action {
 
     // Set the value of the arg in the new (function) environment.
     newEnv.set(params[i].name, value);
+    if (isPointer(value)) {
+        let ptr_val = value as Pointer;
+        state.heap.incRefCount(ptr_val.loc.base);
+        pointer_stack.push(ptr_val.loc.base);
+    }
   }
 
   // Invoke the interpreter on the function.
   let newState: State = {
     env: newEnv,
     heap: state.heap,
+    // TODO: is this pass by reference?
+    pointer_stack: pointer_stack,
     funcs: state.funcs,
     icount: state.icount,
     lastlabel: null,
@@ -369,6 +416,10 @@ function evalCall(instr: bril.Operation, state: State): Action {
   }
   let retVal = evalFunc(func, newState);
   state.icount = newState.icount;
+
+  for (let i = 0; i < pointer_stack.length; i++) {
+    state.heap.decRefCount(pointer_stack[i]);
+  }
 
   // Dynamically check the function's return value and type.
   if (!('dest' in instr)) {  // `instr` is an `EffectOperation`.
@@ -400,7 +451,13 @@ function evalCall(instr: bril.Operation, state: State): Action {
       throw error(`type of value returned by function does not match declaration`);
     }
     state.env.set(instr.dest, retVal);
+    if (isPointer(retVal)) {
+      let ptr_val = retVal as Pointer;
+      state.heap.incRefCount(ptr_val.loc.base);
+    }
   }
+
+  state.heap.auto_free();
   return NEXT;
 }
 
@@ -452,6 +509,11 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   case "id": {
     let val = getArgument(instr, state.env, 0);
     state.env.set(instr.dest, val);
+    if (isPointer(val)) {
+        let ptr_val = val as Pointer;
+        state.pointer_stack.push(ptr_val.loc.base);
+        state.heap.incRefCount(ptr_val.loc.base);
+    }
     return NEXT;
   }
 
@@ -642,6 +704,8 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
     }
     let ptr = alloc(typ, Number(amt), state.heap);
     state.env.set(instr.dest, ptr);
+    state.pointer_stack.push(ptr.loc.base);
+    state.heap.incRefCount(ptr.loc.base);
     return NEXT;
   }
 
@@ -653,7 +717,14 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
 
   case "store": {
     let target = getPtr(instr, state.env, 0);
-    state.heap.write(target.loc, getArgument(instr, state.env, 1, target.type));
+    let val: Value = getArgument(instr, state.env, 1, target.type)
+    state.heap.write(target.loc, val);
+    // make sure it is a Pointer
+    if (isPointer(val)) {
+        let ptr_val = val as Pointer;
+        state.pointer_stack.push(ptr_val.loc.base);
+        state.heap.incRefCount(ptr_val.loc.base);
+  }
     return NEXT;
   }
 
@@ -664,6 +735,11 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
       throw error(`Pointer ${instr.args![0]} points to uninitialized data`);
     } else {
       state.env.set(instr.dest, val);
+      if (isPointer(val)) {
+            let ptr_val = val as Pointer;
+            state.pointer_stack.push(ptr_val.loc.base);
+            state.heap.incRefCount(ptr_val.loc.base);
+      }
     }
     return NEXT;
   }
@@ -671,7 +747,10 @@ function evalInstr(instr: bril.Instruction, state: State): Action {
   case "ptradd": {
     let ptr = getPtr(instr, state.env, 0)
     let val = getInt(instr, state.env, 1)
-    state.env.set(instr.dest, { loc: ptr.loc.add(Number(val)), type: ptr.type })
+    let key = ptr.loc.add(Number(val))
+    state.env.set(instr.dest, { loc: key, type: ptr.type })
+    state.pointer_stack.push(key.base);
+    state.heap.incRefCount(key.base);
     return NEXT;
   }
 
@@ -935,6 +1014,7 @@ function evalProg(prog: bril.Program) {
   let state: State = {
     funcs: prog.functions,
     heap,
+    pointer_stack: new Array(), 
     env: newEnv,
     icount: BigInt(0),
     lastlabel: null,
