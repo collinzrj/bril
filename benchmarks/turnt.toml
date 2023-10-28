@@ -21,6 +21,11 @@ command = "bril2json < {filename} | ../brilift/run.sh {args}"
 default = false
 command = "bril2json < {filename} | ../brilift/target/release/brilift -j -- {args}"
 
+[envs.gc-brili]
+command = "bril2json < {filename} | gc-brili -p {args}"
+output.out = "-"
+output.prof = "2"
+
 # Execution speed benchmark.
 [envs.bench]
 default = false
