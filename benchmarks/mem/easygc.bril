@@ -9,6 +9,5 @@
   val: ptr<int> = alloc input;
   store val two;
   print i;
-  free val;
   ret;
 }

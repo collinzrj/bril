@@ -88,7 +88,7 @@ export class Heap<X> {
         // TODO: can we make sure storage and ref_count are consistent?
         this.storage.delete(key);
         this.ref_count.delete(key);
-        this.ref_to.delete(key);
+        // this.ref_to.delete(key);
       }
     }
   }
@@ -98,7 +98,7 @@ export class Heap<X> {
       this.freeKey(key);
       this.storage.delete(key.base);
       this.ref_count.delete(key.base);
-      this.ref_to.delete(key.base);
+      // this.ref_to.delete(key.base);
     } else {
       throw error(
         `Tried to free illegal memory location base: ${key.base}, offset: ${key.offset}. Offset must be 0.`
@@ -133,9 +133,9 @@ export class Heap<X> {
     this.ref_count.set(base, prev ? prev + 1 : 1);
     console.log("before inc", base, this.ref_count);
     // this.ref_count.set(base, prev + 1);
-    if (ref) {
-      this.ref_to[base].append(ref);
-    }
+    // if (ref) {
+    //   this.ref_to[base].append(ref);
+    // }
     console.log("after inc", base, this.ref_count);
   }
 
@@ -458,6 +458,7 @@ function evalCall(instr: bril.Operation, state: State): Action {
       pointer_stack.push(ptr_val.loc.base);
     }
   }
+  console.log("pointer stack before", pointer_stack);
 
   // Invoke the interpreter on the function.
   let newState: State = {
@@ -474,9 +475,9 @@ function evalCall(instr: bril.Operation, state: State): Action {
   let retVal = evalFunc(func, newState);
   state.icount = newState.icount;
 
-  for (let i = 0; i < pointer_stack.length; i++) {
-    state.heap.decRefCount(pointer_stack[i]);
-  }
+  // for (let i = 0; i < pointer_stack.length; i++) {
+  //   state.heap.decRefCount(pointer_stack[i]);
+  // }
 
   // Dynamically check the function's return value and type.
   if (!("dest" in instr)) {
@@ -521,7 +522,12 @@ function evalCall(instr: bril.Operation, state: State): Action {
     if (isPointer(retVal)) {
       let ptr_val = retVal as Pointer;
       state.heap.incRefCount(ptr_val.loc.base);
+      state.pointer_stack.push(ptr_val.loc.base);
     }
+  }
+  console.log("pointer stack after func", pointer_stack);
+  for (let i = 0; i < pointer_stack.length; i++) {
+    state.heap.decRefCount(pointer_stack[i]);
   }
 
   state.heap.auto_free();
@@ -1091,10 +1097,11 @@ function evalProg(prog: bril.Program) {
   let expected = main.args || [];
   let newEnv = parseMainArguments(expected, args);
 
+  let pointer_stack = new Array<number>();
   let state: State = {
     funcs: prog.functions,
     heap,
-    pointer_stack: new Array(),
+    pointer_stack: pointer_stack,
     env: newEnv,
     icount: BigInt(0),
     lastlabel: null,
@@ -1104,7 +1111,8 @@ function evalProg(prog: bril.Program) {
   evalFunc(main, state);
 
   console.log(heap);
-  console.log("pointer_stack", state.pointer_stack);
+  // console.log("pointer_stack", state.pointer_stack);
+  let unreachable = state.heap;
   for (let i = 0; i < state.pointer_stack.length; i++) {
     state.heap.decRefCount(state.pointer_stack[i]);
   }
