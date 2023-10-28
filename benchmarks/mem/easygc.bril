@@ -1,0 +1,14 @@
+# ARGS: 1
+@main(input: int) {
+  one: int = const 1;
+  two: int = const 2;
+  val: ptr<int> = alloc input;
+  store val one;
+  i: int = load val;
+  print i;
+  val: ptr<int> = alloc input;
+  store val two;
+  print i;
+  free val;
+  ret;
+}
